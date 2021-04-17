@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -19,10 +21,12 @@ import (
 )
 
 const (
-	tlsDir                  = `/run/secrets/tls`
-	tlsCertFile             = `tls.crt`
-	tlsKeyFile              = `tls.key`
-	podTerminatorAnnotation = "pod-terminator"
+	tlsDir                        = `/run/secrets/tls`
+	tlsCertFile                   = `tls.crt`
+	tlsKeyFile                    = `tls.key`
+	podTerminatorAnnotation       = "pod-terminator"
+	podTerminationDelayAnnotation = "pod-terminator-delay"
+	defaultDelay                  = time.Second * 150
 )
 
 var (
@@ -31,6 +35,11 @@ var (
 	endpointResource = metav1.GroupVersionResource{Version: "v1", Resource: "endpoints"}
 	deletionCache    = map[string]time.Time{}
 )
+
+type ResourceIDRequest struct {
+	Namespace string `json:"namespace"`
+	Name      string `json:"name"`
+}
 
 func prettyJSON(obj interface{}) string {
 	buffer, _ := json.Marshal(obj)
@@ -168,7 +177,7 @@ func validateDeletion(req *v1beta1.AdmissionRequest, clientSet *kubernetes.Clien
 
 	log.Printf("Reviewing pod deletion operation: %s", cacheID)
 
-	pod, err := clientSet.CoreV1().Pods(req.Namespace).Get(req.Name, metav1.GetOptions{})
+	pod, err := clientSet.CoreV1().Pods(req.Namespace).Get(context.Background(), req.Name, metav1.GetOptions{})
 	if err != nil {
 		return false, fmt.Sprintf("Failed to read pod %s/%s: %v", req.Namespace, req.Name, err), nil, nil
 	}
@@ -183,25 +192,92 @@ func validateDeletion(req *v1beta1.AdmissionRequest, clientSet *kubernetes.Clien
 		return true, "Pod does not have annotation, allow deletion.", nil, nil
 	}
 
-	resp, err := http.DefaultClient.Post(fmt.Sprintf("http://%s:9527/fail", pod.Status.PodIP), "application/json", bytes.NewBufferString(""))
+	rr, err := findService(clientSet, req.Namespace, req.Name, pod.Status.PodIP)
 	if err != nil {
-		return false, fmt.Sprintf("Failed to set pod to fail %s/%s: %v", req.Namespace, req.Name, err), nil, nil
+		return false, fmt.Sprintf("Failed to locate service for pod %s/%s: %s", req.Namespace, req.Name, err), nil, nil
 	}
-	defer resp.Body.Close()
+
+	reqBody, err := json.Marshal(rr)
+	if err != nil {
+		return false, fmt.Sprintf("Failed to marshal service name for pod %s/%s: %s", req.Namespace, req.Name, err), nil, nil
+	}
 
 	if c, ok := deletionCache[cacheID]; ok {
+		// TODO: delete the pod in timer
 		if time.Now().After(c) {
 			log.Printf("Pod %s passed pre-deletion-hook, allow deletion.", cacheID)
+
+			resp, err := http.DefaultClient.Post(fmt.Sprintf("http://%s:10257/reset", pod.Status.HostIP), "application/json", bytes.NewBuffer(reqBody))
+			if err != nil {
+				return false, fmt.Sprintf("Failed to reset endpoint %s/%s: %v", req.Namespace, req.Name, err), nil, nil
+			}
+			if resp.StatusCode != http.StatusOK {
+				return false, fmt.Sprintf("Failed to reset endpoint %s/%s, status code: %d", req.Namespace, req.Name, resp.StatusCode), nil, nil
+			}
+			defer resp.Body.Close()
+
 			delete(deletionCache, cacheID)
 			return true, "", nil, nil
 		}
 	} else {
-		deletionCache[cacheID] = time.Now().UTC().Add(time.Minute)
+		// TODO: fail if no other healthy pods on the same node (by getting node name and loop endpoint sets)
+		resp, err := http.DefaultClient.Post(fmt.Sprintf("http://%s:10257/fail", pod.Status.HostIP), "application/json", bytes.NewBuffer(reqBody))
+		if err != nil {
+			return false, fmt.Sprintf("Failed to set pod to fail %s/%s: %v", req.Namespace, req.Name, err), nil, nil
+		}
+		if resp.StatusCode != http.StatusOK {
+			return false, fmt.Sprintf("Failed to set pod to fail %s/%s, status code: %d", req.Namespace, req.Name, resp.StatusCode), nil, nil
+		}
+		defer resp.Body.Close()
+
+		delayDuration := defaultDelay
+		if val, ok := pod.Annotations[podTerminationDelayAnnotation]; ok {
+			if sec, success := strconv.Atoi(val); success != nil {
+				delayDuration = time.Second * time.Duration(sec)
+			}
+		}
+		deletionCache[cacheID] = time.Now().UTC().Add(delayDuration)
 	}
 
 	reason := fmt.Sprintf("Pod %s requires pre-deletion-hook, will allow deletion at %s.", cacheID, deletionCache[cacheID])
-	log.Printf(reason)
+	log.Println(reason)
 	return false, reason, nil, nil
+}
+
+func findService(clientSet *kubernetes.Clientset, namespace, name, podIP string) (ResourceIDRequest, error) {
+	eps, err := clientSet.CoreV1().Endpoints(namespace).List(context.Background(), metav1.ListOptions{})
+	if err != nil {
+		log.Printf("Failed to list endpoints: %s", err)
+		return ResourceIDRequest{}, fmt.Errorf("failed to list endpoints: %s", err)
+	}
+
+	for _, ep := range eps.Items {
+		for _, ss := range ep.Subsets {
+			for _, addr := range ss.Addresses {
+				if addr.IP == podIP {
+					nsn := ResourceIDRequest{
+						Namespace: ep.Namespace,
+						Name:      ep.Name,
+					}
+
+					return nsn, nil
+				}
+			}
+
+			for _, addr := range ss.NotReadyAddresses {
+				if addr.IP == podIP {
+					nsn := ResourceIDRequest{
+						Namespace: ep.Namespace,
+						Name:      ep.Name,
+					}
+
+					return nsn, nil
+				}
+			}
+		}
+	}
+
+	return ResourceIDRequest{}, fmt.Errorf("could not find endpoint for pod IP: %s", podIP)
 }
 
 func kubeClientSet(inCluster bool) (*kubernetes.Clientset, error) {

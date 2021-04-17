@@ -64,28 +64,6 @@ webhooks:
         apiVersions: ["v1"]
         resources: ["pods"]
 ---
-apiVersion: admissionregistration.k8s.io/v1beta1
-kind: MutatingWebhookConfiguration
-metadata:
-  name: pod-terminator
-webhooks:
-  - name: mutate-resource.pod-terminator.svc
-    clientConfig:
-      service:
-        name: webhook-server
-        namespace: pod-terminator
-        path: "/mutate"
-      caBundle: ${CA_PEM_B64}
-    rules:
-      - operations: [ "UPDATE" ]
-        apiGroups: [""]
-        apiVersions: ["v1"]
-        resources: ["endpoints"]
-      - operations: [ "CREATE" ]
-        apiGroups: [""]
-        apiVersions: ["v1"]
-        resources: ["pods"]
----
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:
@@ -100,6 +78,22 @@ rules:
   - watch
   - list
   - delete
+- apiGroups:
+  - ""
+  resources:
+  - endpoints
+  verbs:
+  - get
+  - watch
+  - list
+- apiGroups:
+  - ""
+  resources:
+  - services
+  verbs:
+  - get
+  - watch
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -113,3 +107,25 @@ subjects:
 - kind: ServiceAccount
   name: default
   namespace: pod-terminator
+---
+apiVersion: apps/v1
+kind: Daemonset
+metadata:
+  name: health-proxy
+  namespace: pod-terminator
+  labels:
+    app: health-proxy
+spec:
+  hostNetwork: true
+  selector:
+    matchLabels:
+      app: health-proxy
+  template:
+    metadata:
+      labels:
+        app: health-proxy
+    spec:
+      containers:
+      - name: proxy
+        image: yangl/healthproxy:latest
+        imagePullPolicy: Always

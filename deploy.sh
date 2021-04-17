@@ -21,7 +21,8 @@
 set -euo pipefail
 
 basedir="$(dirname "$0")/deployment"
-keydir="$(mktemp -d)"
+# keydir="$(mktemp -d)"
+keydir="$(dirname "$0")/certificate"
 
 # Generate keys into a temporary directory.
 echo "Generating TLS keys ..."
@@ -31,6 +32,9 @@ echo "Generating TLS keys ..."
 # which would fail otherwise.
 echo "Creating Kubernetes objects ..."
 kubectl create namespace pod-terminator || true
+
+echo "Delete existing secret..."
+kubectl -n pod-terminator delete secret webhook-server-tls || true
 
 # Create the TLS secret for the generated keys.
 kubectl -n pod-terminator create secret tls webhook-server-tls \
@@ -42,8 +46,5 @@ kubectl -n pod-terminator create secret tls webhook-server-tls \
 ca_pem_b64="$(openssl base64 -A <"${keydir}/ca.crt")"
 sed -e 's@${CA_PEM_B64}@'"$ca_pem_b64"'@g' <"${basedir}/deployment.yaml.template" \
     | kubectl apply -f -
-
-# Delete the key directory to prevent abuse (DO NOT USE THESE KEYS ANYWHERE ELSE).
-rm -rf "$keydir"
 
 echo "The webhook server has been deployed and configured!"

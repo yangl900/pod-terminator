@@ -16,3 +16,4 @@
 
 rerouter
 image/webhook-server
+health-proxy/health-proxy
