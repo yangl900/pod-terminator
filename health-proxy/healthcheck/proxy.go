@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 
+	"github.com/yangl900/pod-terminator/health-proxy/iptables"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -66,9 +68,10 @@ type ServiceHealthServer interface {
 	ResetService(nsn types.NamespacedName) error
 }
 
-func newServiceHealthServer(hostname string, recorder record.EventRecorder, listener listener, factory httpServerFactory) ServiceHealthServer {
+func newServiceHealthServer(hostname, hostIP string, recorder record.EventRecorder, listener listener, factory httpServerFactory) ServiceHealthServer {
 	return &server{
 		hostname:    hostname,
+		HostIP:      hostIP,
 		recorder:    recorder,
 		listener:    listener,
 		httpFactory: factory,
@@ -77,14 +80,15 @@ func newServiceHealthServer(hostname string, recorder record.EventRecorder, list
 }
 
 // NewServiceHealthServer allocates a new service healthcheck server manager
-func NewServiceHealthServer(hostname string, recorder record.EventRecorder) ServiceHealthServer {
-	return newServiceHealthServer(hostname, recorder, stdNetListener{}, stdHTTPServerFactory{})
+func NewServiceHealthServer(hostname, hostIP string, recorder record.EventRecorder) ServiceHealthServer {
+	return newServiceHealthServer(hostname, hostIP, recorder, stdNetListener{}, stdHTTPServerFactory{})
 }
 
 var _ httpServerFactory = stdHTTPServerFactory{}
 
 type server struct {
 	hostname    string
+	HostIP      string
 	recorder    record.EventRecorder // can be nil
 	listener    listener
 	httpFactory httpServerFactory
@@ -127,14 +131,21 @@ func (hcs *server) SyncServices(newServices map[types.NamespacedName]uint16) err
 			if err := svc.listener.Close(); err != nil {
 				klog.Errorf("Close(%v): %v", svc.listener.Addr(), err)
 			}
+
+			iptables.DeleteCustomChain(strconv.Itoa(int(svc.healthcheckPort)))
 			delete(hcs.services, nsn)
 		}
 	}
 
 	// Add any that are needed.
 	for nsn, port := range newServices {
-		if hcs.services[nsn] != nil {
+		if hci := hcs.services[nsn]; hci != nil {
 			klog.V(3).Infof("Existing healthcheck %q on port %d", nsn.String(), port)
+
+			if err := iptables.AddCustomChain(hcs.HostIP, strconv.Itoa(int(hci.healthcheckPort)), "127.0.0.1", strconv.Itoa(int(hci.proxyPort))); err != nil {
+				klog.Errorf("Failed to ensure iptable rules for svc %s healthcheck port %d: %s", nsn, hci.healthcheckPort, err)
+			}
+
 			continue
 		}
 
@@ -172,6 +183,10 @@ func (hcs *server) SyncServices(newServices map[types.NamespacedName]uint16) err
 			}
 			klog.V(3).Infof("Healthcheck %q closed", nsn.String())
 		}(nsn, svc)
+
+		if err := iptables.AddCustomChain(hcs.HostIP, strconv.Itoa(int(svc.healthcheckPort)), "127.0.0.1", strconv.Itoa(int(svc.proxyPort))); err != nil {
+			klog.Errorf("Failed to add iptable rules for svc %s healthcheck port %d: %s", nsn, svc.healthcheckPort, err)
+		}
 	}
 	return nil
 }

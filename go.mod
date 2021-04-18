@@ -3,6 +3,7 @@ module github.com/yangl900/pod-terminator
 go 1.15
 
 require (
+	github.com/coreos/go-iptables v0.5.0
 	github.com/stretchr/testify v1.7.0 // indirect
 	k8s.io/api v0.21.0
 	k8s.io/apimachinery v0.21.0

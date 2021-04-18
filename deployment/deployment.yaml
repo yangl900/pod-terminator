@@ -152,10 +152,40 @@ spec:
         app: health-proxy
     spec:
       hostNetwork: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      volumes:
+      - hostPath:
+          path: /run/xtables.lock
+          type: FileOrCreate
+        name: iptableslock
       containers:
       - name: proxy
         image: yangl/healthproxy:latest
         imagePullPolicy: Always
+        securityContext:
+          runAsUser: 0
+          capabilities:
+            drop:
+            - ALL
+            add:
+            - DAC_READ_SEARCH
+            - NET_ADMIN
+            - NET_RAW
+        volumeMounts:
+        - mountPath: /run/xtables.lock
+          name: iptableslock
+        env:
+          - name: HOST_IP
+            valueFrom:
+              fieldRef:
+                fieldPath: status.podIP
+        livenessProbe:
+          httpGet:
+            path: /healthz
+            port: 10257
+          initialDelaySeconds: 10
+          periodSeconds: 5
       tolerations:
         - key: CriticalAddonsOnly
           operator: Exists

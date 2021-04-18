@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"flag"
 	"io/ioutil"
-	"log"
 	"net/http"
+	"os"
 	"time"
 
 	"context"
@@ -57,13 +57,19 @@ func main() {
 	flag.Set("v", "9")
 	flag.Parse()
 
+	hostIP, ok := os.LookupEnv("HOST_IP")
+	if !ok {
+		klog.Errorf("Expected environment variable HOST_IP not set")
+		return
+	}
+
 	clientSet, err := kubeClientSet(true)
 	if err != nil {
 		klog.Errorf("Failed to create kubeclient: %s \n", err.Error())
 		return
 	}
 	recorder := createRecorder(clientSet, "pod-terminator")
-	server := healthcheck.NewServiceHealthServer("localhost", recorder)
+	server := healthcheck.NewServiceHealthServer("localhost", hostIP, recorder)
 
 	go func() {
 		for {
@@ -172,5 +178,5 @@ func main() {
 		Addr:    ":10257",
 		Handler: mux,
 	}
-	log.Fatal(healthProxyServer.ListenAndServe())
+	klog.Fatal(healthProxyServer.ListenAndServe())
 }
