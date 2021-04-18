@@ -127,7 +127,7 @@ func ensureCustomChain(ipt *iptables.IPTables, destIP, destPort, targetip, targe
 }
 
 func flushCreateCustomChainrules(ipt *iptables.IPTables, destIP, destPort, targetip, targetport, customChainName string) error {
-	klog.Warning("flushing iptables: custom chain %s dest %s:%s target %s:%s", customChainName, destIP, destPort, targetip, targetport)
+	klog.Warningf("flushing iptables: custom chain %s dest %s:%s target %s:%s", customChainName, destIP, destPort, targetip, targetport)
 	if err := ipt.ClearChain(tablename, customChainName); err != nil {
 		return err
 	}
