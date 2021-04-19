@@ -2,6 +2,7 @@ package healthcheck
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -211,6 +212,7 @@ func (h hcHandler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 	svc, ok := h.hcs.services[h.name]
 	if !ok || svc == nil {
 		h.hcs.lock.RUnlock()
+		resp.WriteHeader(http.StatusInternalServerError)
 		klog.Errorf("Received request for closed healthcheck %q", h.name.String())
 		return
 	}
@@ -218,10 +220,19 @@ func (h hcHandler) ServeHTTP(resp http.ResponseWriter, req *http.Request) {
 
 	resp.Header().Set("Content-Type", "application/json")
 	resp.Header().Set("X-Content-Type-Options", "nosniff")
+	resp.Header().Set("Server", "health-proxy")
 	if svc.terminating {
 		resp.WriteHeader(http.StatusServiceUnavailable)
 	} else {
-		// TODO: proxy to healthcheck port
-		resp.WriteHeader(http.StatusOK)
+		r, err := http.Get(fmt.Sprintf("http://localhost:%d", svc.healthcheckPort))
+		if err != nil {
+			klog.Errorf("Failed to send health check request on port %d", svc.healthcheckPort)
+			resp.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		defer r.Body.Close()
+		resp.Header().Set("Content-Length", r.Header.Get("Content-Length"))
+		resp.WriteHeader(r.StatusCode)
+		io.Copy(resp, r.Body)
 	}
 }
