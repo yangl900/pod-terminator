@@ -1,7 +1,11 @@
 # pod-terminator
+Gracefully shutdown pods that serves `externalTrafficPolicy: local` service, to avoid downtime during deployment.
 
-Run `./deploy.sh` to install the pod-terminator in `pod-terminator` namespace.
+## Installation
+1. Run `make cert-manager` to install cert-manager in the cluster.
+2. Run `make install` to install the pod-terminator in `pod-terminator` namespace.
 
-Any deployment with annotation `pod-terminator: enabled` will have a pre-termination period.
+## Usage
+Annotate the pod with `pod-terminator: enabled`.
 
 Sample in `./deployment/nginx.yaml`
