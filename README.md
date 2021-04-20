@@ -6,6 +6,6 @@ Gracefully shutdown pods that serves `externalTrafficPolicy: local` service, to 
 2. Run `make install` to install the pod-terminator in `pod-terminator` namespace.
 
 ## Usage
-Annotate the pod with `pod-terminator: enabled`.
+Annotate both service and pod with `pod-terminator: enabled`.
 
 Sample in `./deployment/nginx.yaml`

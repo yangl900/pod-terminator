@@ -61,12 +61,9 @@ type ServiceHealthServer interface {
 	// existed and are in the new set will be left alone.  The value of the map
 	// is the healthcheck-port to listen on.
 	SyncServices(newServices map[types.NamespacedName]uint16) error
-	// Make the new set of endpoints be active.  Endpoints for services that do
-	// not exist will be dropped.  The value of the map is the number of
-	// endpoints the service has on this node.
 	FailService(nsn types.NamespacedName) error
-
 	ResetService(nsn types.NamespacedName) error
+	Stop()
 }
 
 func newServiceHealthServer(hostname, hostIP string, recorder record.EventRecorder, listener listener, factory httpServerFactory) ServiceHealthServer {
@@ -95,20 +92,46 @@ type server struct {
 	httpFactory httpServerFactory
 
 	lock     sync.RWMutex
+	stopped  bool
 	services map[types.NamespacedName]*hcInstance
 }
 
+func (hcs *server) Stop() {
+	hcs.lock.Lock()
+	defer hcs.lock.Unlock()
+	hcs.stopped = true
+	for nsn, svc := range hcs.services {
+		klog.V(2).Infof("Removing iptable rules for %q on port %d \n", nsn.String(), svc.proxyPort)
+		if err := iptables.DeleteCustomChain(strconv.Itoa(int(svc.healthcheckPort))); err != nil {
+			klog.Errorf("Failed to cleanup iptable rules for service %s", nsn)
+		}
+
+		klog.V(2).Infof("Closing healthcheck %q on port %d \n", nsn.String(), svc.proxyPort)
+		if err := svc.listener.Close(); err != nil {
+			klog.Errorf("Close(%v): %v", svc.listener.Addr(), err)
+		}
+		delete(hcs.services, nsn)
+	}
+}
+
 func (hcs *server) FailService(nsn types.NamespacedName) error {
+	hcs.lock.Lock()
+	defer hcs.lock.Unlock()
+
 	svc, ok := hcs.services[nsn]
 	if !ok {
 		return fmt.Errorf("service not found: %s/%s", nsn.Namespace, nsn.Name)
 	}
 
+	klog.V(2).Infof("Setting service %s to fail.", nsn)
 	svc.terminating = true
 	return nil
 }
 
 func (hcs *server) ResetService(nsn types.NamespacedName) error {
+	hcs.lock.Lock()
+	defer hcs.lock.Unlock()
+
 	klog.V(2).Infof("Ressting service %s", nsn)
 
 	svc, ok := hcs.services[nsn]
@@ -124,6 +147,11 @@ func (hcs *server) ResetService(nsn types.NamespacedName) error {
 func (hcs *server) SyncServices(newServices map[types.NamespacedName]uint16) error {
 	hcs.lock.Lock()
 	defer hcs.lock.Unlock()
+
+	if hcs.stopped {
+		klog.Errorf("Health proxy server has been stopped. Skip syncing services.")
+		return nil
+	}
 
 	// Remove any that are not needed any more.
 	for nsn, svc := range hcs.services {

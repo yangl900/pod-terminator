@@ -6,6 +6,9 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"context"
@@ -21,6 +24,8 @@ import (
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog"
 )
+
+const podTerminatorAnnotation = "pod-terminator"
 
 type ResourceIDRequest struct {
 	Namespace string `json:"namespace"`
@@ -71,35 +76,10 @@ func main() {
 	recorder := createRecorder(clientSet, "pod-terminator")
 	server := healthcheck.NewServiceHealthServer("localhost", hostIP, recorder)
 
-	go func() {
-		for {
-			svcs, err := clientSet.CoreV1().Services("").List(context.Background(), metav1.ListOptions{})
-			if err != nil {
-				time.After(time.Second * 10)
-				continue
-			}
-
-			svcPorts := map[types.NamespacedName]uint16{}
-			for _, svc := range svcs.Items {
-				if svc.Spec.ExternalTrafficPolicy != v1.ServiceExternalTrafficPolicyTypeLocal {
-					continue
-				}
-
-				klog.V(4).Infof("Found svc with local traffic policy: %s/%s port: %d\n", svc.Namespace, svc.Name, svc.Spec.HealthCheckNodePort)
-				nsn := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
-				svcPorts[nsn] = uint16(svc.Spec.HealthCheckNodePort)
-			}
-
-			if err := server.SyncServices(svcPorts); err != nil {
-				klog.Errorf("Failed to sync service ports.")
-			}
-
-			<-time.After(time.Second * 30)
-		}
-	}()
+	go serviceSyncLoop(server, clientSet)
+	go handleOSSignal(server)
 
 	mux := http.NewServeMux()
-
 	mux.HandleFunc("/healthz", func(rw http.ResponseWriter, req *http.Request) {
 		rw.WriteHeader(200)
 	})
@@ -179,4 +159,47 @@ func main() {
 		Handler: mux,
 	}
 	klog.Fatal(healthProxyServer.ListenAndServe())
+}
+
+func serviceSyncLoop(server healthcheck.ServiceHealthServer, clientSet *kubernetes.Clientset) {
+	for {
+		svcs, err := clientSet.CoreV1().Services("").List(context.Background(), metav1.ListOptions{})
+		if err != nil {
+			klog.Errorf("Failed to list services: %s", err)
+			time.After(time.Second * 10)
+			continue
+		}
+
+		svcPorts := map[types.NamespacedName]uint16{}
+		for _, svc := range svcs.Items {
+			if svc.Spec.ExternalTrafficPolicy != v1.ServiceExternalTrafficPolicyTypeLocal {
+				continue
+			}
+
+			if svc.Annotations == nil || !strings.EqualFold(svc.Annotations[podTerminatorAnnotation], "enabled") {
+				klog.V(4).Infof("Found svc %s/%s but without annotation, will not proxy health check.", svc.Namespace, svc.Name)
+				continue
+			}
+
+			klog.V(4).Infof("Found svc with local traffic policy: %s/%s port: %d\n", svc.Namespace, svc.Name, svc.Spec.HealthCheckNodePort)
+			nsn := types.NamespacedName{Namespace: svc.Namespace, Name: svc.Name}
+			svcPorts[nsn] = uint16(svc.Spec.HealthCheckNodePort)
+		}
+
+		if err := server.SyncServices(svcPorts); err != nil {
+			klog.Errorf("Failed to sync service ports.")
+		}
+
+		<-time.After(time.Second * 30)
+	}
+}
+
+func handleOSSignal(server healthcheck.ServiceHealthServer) {
+	sigs := make(chan os.Signal, 1)
+	signal.Notify(sigs, syscall.SIGINT, syscall.SIGTERM)
+
+	s := <-sigs
+
+	klog.V(2).Infof("Closing health proxy server for signal %s", s)
+	server.Stop()
 }
